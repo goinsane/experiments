@@ -158,7 +158,9 @@ func (d *Daemon) loop(ctx context.Context, wg *sync.WaitGroup, tm time.Time, dat
 			data.Stopped = true
 			data.Err = e
 		}
-		data.flush()
+		if ctx.Err() != nil {
+			data.flush()
+		}
 	}
 }
 
