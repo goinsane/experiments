@@ -25,11 +25,12 @@ type JobData struct {
 }
 
 func NewJobData(job Job) *JobData {
-	return &JobData{
-		Job:                job,
-		Locker:             &xcontext.Locker{},
-		notificationEvents: make(map[string][]chan<- Event, 16),
+	d := &JobData{
+		Job:    job,
+		Locker: &xcontext.Locker{},
 	}
+	d.flush()
+	return d
 }
 
 func (d *JobData) Duplicate() *JobData {
@@ -50,6 +51,10 @@ func (d *JobData) DuplicateWithLock(ctx context.Context) (*JobData, error) {
 	}
 	defer d.Unlock()
 	return d.Duplicate(), nil
+}
+
+func (d *JobData) flush() {
+	d.notificationEvents = make(map[string][]chan<- Event, 16)
 }
 
 type SendEventFunc func(eventName string, eventData interface{}) error

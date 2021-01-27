@@ -56,14 +56,9 @@ func (d *Daemon) Loop(ctx context.Context) {
 	eventsCh := d.eventsCh
 	d.mu.Unlock()
 
-	eventLoopCtx, eventLoopCtxCancel := context.WithCancel(context.Background())
 	eventLoopWg := new(sync.WaitGroup)
 	eventLoopWg.Add(1)
-	go d.eventLoop(eventLoopCtx, eventLoopWg, eventsCh)
-	defer eventLoopWg.Wait()
-	defer eventLoopCtxCancel()
-
-	wg := new(sync.WaitGroup)
+	go d.eventLoop(eventLoopWg, eventsCh)
 
 	periodSec := int64(d.LoopPeriod.Round(time.Second) / time.Second)
 	if periodSec <= 0 {
@@ -73,6 +68,7 @@ func (d *Daemon) Loop(ctx context.Context) {
 
 	tckr := time.NewTicker(time.Second)
 	defer tckr.Stop()
+	wg := new(sync.WaitGroup)
 	for ctx.Err() == nil {
 		var done bool
 		var tm time.Time
@@ -95,7 +91,7 @@ func (d *Daemon) Loop(ctx context.Context) {
 				break
 			}
 			wg.Add(1)
-			go d.loop(ctx, ctx, wg, tm, data)
+			go d.loop(ctx, wg, tm, data)
 		}
 		d.mu.RUnlock()
 	}
@@ -105,33 +101,53 @@ func (d *Daemon) Loop(ctx context.Context) {
 	d.mu.RLock()
 	for _, data := range d.jobDatas {
 		wg.Add(1)
-		go d.loop(ctx, nil, wg, tm, data)
+		go d.loop(ctx, wg, tm, data)
 	}
 	d.mu.RUnlock()
 	wg.Wait()
 
 	d.mu.Lock()
-	close(d.eventsCh)
-	d.eventsCh = nil
+	d.finalize()
 	d.mu.Unlock()
+
+	eventLoopWg.Wait()
 }
 
-func (d *Daemon) loop(ctx, lockCtx context.Context, wg *sync.WaitGroup, tm time.Time, data *JobData) {
-	if wg != nil {
-		defer wg.Done()
+func (d *Daemon) initialize() {
+	if d.eventsCh == nil {
+		d.eventsCh = make(chan Event, 1024)
 	}
+	if d.jobDatas == nil {
+		d.jobDatas = make(map[int]*JobData, 1024)
+	}
+}
 
-	if err := data.LockContext(lockCtx); err != nil {
-		return
-	}
+func (d *Daemon) finalize() {
+	close(d.eventsCh)
+	d.eventsCh = nil
+	d.jobDatas = nil
+}
+
+func (d *Daemon) getJobData(id int) *JobData {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.jobDatas[id]
+}
+
+func (d *Daemon) loop(ctx context.Context, wg *sync.WaitGroup, tm time.Time, data *JobData) {
+	defer wg.Done()
+
+	data.Lock()
+	defer data.Unlock()
 
 	if !data.InLoop && data.Err == nil && !data.Stopped {
-		id := data.Job.Id()
+		job := data.Job
+		id := job.Id()
 		data.InLoop = true
 		data.Unlock()
 
 		d.InfoLogger.Infof("job %d enters in loop", id)
-		ok, e := data.Job.Loop(ctx, tm)
+		ok, e := job.Loop(ctx, tm)
 		d.InfoLogger.Infof("job %d exits in loop", id)
 
 		data.Lock()
@@ -142,62 +158,31 @@ func (d *Daemon) loop(ctx, lockCtx context.Context, wg *sync.WaitGroup, tm time.
 			data.Stopped = true
 			data.Err = e
 		}
+		data.flush()
 	}
-
-	data.Unlock()
 }
 
-func (d *Daemon) eventLoop(ctx context.Context, wg *sync.WaitGroup, eventsCh <-chan Event) {
-	if wg != nil {
-		defer wg.Done()
-	}
-	for ctx.Err() == nil {
-		var done bool
-		var event Event
-		var ok bool
-		select {
-		case <-ctx.Done():
-			done = true
-		case event, ok = <-eventsCh:
-			if !ok {
-				done = true
-			}
-		}
-		if done {
-			break
-		}
-
+func (d *Daemon) eventLoop(wg *sync.WaitGroup, eventsCh <-chan Event) {
+	defer wg.Done()
+	for event := range eventsCh {
 		id := event.JobFrom.Id()
 		data := d.getJobData(id)
 		if data == nil {
 			continue
 		}
-		if err := data.LockContext(ctx); err != nil {
-			continue
-		}
-		eventChs := data.notificationEvents[event.Name]
-		chs := make([]chan<- Event, 0, len(eventChs))
-		for _, ch := range eventChs {
+		data.Lock()
+		for _, ch := range data.notificationEvents[event.Name] {
 			if ch == nil {
 				continue
 			}
-			chs = append(chs, ch)
-		}
-		data.Unlock()
-		for _, ch := range chs {
 			select {
 			case ch <- event:
 			default:
-				d.ErrorLogger.Errorf("event loop error for job id %d, event %q: notification channel is full", id, event.Name)
+				d.ErrorLogger.Errorf("event loop error for job %d and event %q: notification channel is full", id, event.Name)
 			}
 		}
+		data.Unlock()
 	}
-}
-
-func (d *Daemon) getJobData(id int) *JobData {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.jobDatas[id]
 }
 
 func (d *Daemon) RegisterJob(job Job) error {
@@ -235,16 +220,7 @@ func (d *Daemon) UnregisterJob(job Job) error {
 	return nil
 }
 
-func (d *Daemon) initialize() {
-	if d.eventsCh == nil {
-		d.eventsCh = make(chan Event, 1024)
-	}
-	if d.jobDatas == nil {
-		d.jobDatas = make(map[int]*JobData, 1024)
-	}
-}
-
-func (d *Daemon) Jobs(ctx context.Context, includeStoppeds bool) ([]*JobData, error) {
+func (d *Daemon) Jobs(includeStoppeds bool) ([]*JobData, error) {
 	var err error
 	d.mu.RLock()
 	result := make([]*JobData, 0, len(d.jobDatas))
@@ -256,7 +232,7 @@ func (d *Daemon) Jobs(ctx context.Context, includeStoppeds bool) ([]*JobData, er
 	}
 	d.mu.RUnlock()
 	for id, data := range result {
-		result[id], err = data.DuplicateWithLock(ctx)
+		result[id], err = data.DuplicateWithLock(nil)
 		if err != nil {
 			return nil, newError(err)
 		}
@@ -264,7 +240,7 @@ func (d *Daemon) Jobs(ctx context.Context, includeStoppeds bool) ([]*JobData, er
 	return result, nil
 }
 
-func (d *Daemon) NotifyEvent(ctx context.Context, eventJobFrom Job, eventName string, ch chan<- Event) error {
+func (d *Daemon) NotifyEvent(eventJobFrom Job, eventName string, ch chan<- Event) error {
 	id := eventJobFrom.Id()
 	if id < 0 {
 		return newError(fmt.Errorf("%w: %d", ErrInvalidJobId, id))
@@ -276,9 +252,7 @@ func (d *Daemon) NotifyEvent(ctx context.Context, eventJobFrom Job, eventName st
 	if ch == nil {
 		return nil
 	}
-	if err := data.LockContext(ctx); err != nil {
-		return newError(err)
-	}
+	data.Lock()
 	defer data.Unlock()
 	eventChs := data.notificationEvents[eventName]
 	idx := sort.Search(len(eventChs), func(i int) bool {
@@ -295,7 +269,7 @@ func (d *Daemon) NotifyEvent(ctx context.Context, eventJobFrom Job, eventName st
 	return nil
 }
 
-func (d *Daemon) StopEventNotification(ctx context.Context, eventJobFrom Job, eventName string, ch chan<- Event) error {
+func (d *Daemon) StopEventNotification(eventJobFrom Job, eventName string, ch chan<- Event) error {
 	id := eventJobFrom.Id()
 	if id < 0 {
 		return newError(fmt.Errorf("%w: %d", ErrInvalidJobId, id))
@@ -304,9 +278,7 @@ func (d *Daemon) StopEventNotification(ctx context.Context, eventJobFrom Job, ev
 	if data == nil || eventJobFrom != data.Job {
 		return newError(fmt.Errorf("%w: %d", ErrJobIdNotRegistered, id))
 	}
-	if err := data.LockContext(ctx); err != nil {
-		return newError(err)
-	}
+	data.Lock()
 	defer data.Unlock()
 	if ch == nil {
 		delete(data.notificationEvents, eventName)
@@ -334,7 +306,7 @@ func (d *Daemon) StopEventNotification(ctx context.Context, eventJobFrom Job, ev
 	return nil
 }
 
-func (d *Daemon) ResetAllEventNotifications(ctx context.Context, eventJobFrom Job) error {
+func (d *Daemon) StopAllEventNotifications(eventJobFrom Job) error {
 	id := eventJobFrom.Id()
 	if id < 0 {
 		return newError(fmt.Errorf("%w: %d", ErrInvalidJobId, id))
@@ -343,11 +315,9 @@ func (d *Daemon) ResetAllEventNotifications(ctx context.Context, eventJobFrom Jo
 	if data == nil || eventJobFrom != data.Job {
 		return newError(fmt.Errorf("%w: %d", ErrJobIdNotRegistered, id))
 	}
-	if err := data.LockContext(ctx); err != nil {
-		return newError(err)
-	}
+	data.Lock()
 	defer data.Unlock()
-	data.notificationEvents = make(map[string][]chan<- Event, 16)
+	data.flush()
 	return nil
 }
 
@@ -356,21 +326,19 @@ func (d *Daemon) sendEvent(eventJobFrom Job, eventName string, eventData interfa
 	if id < 0 {
 		return newError(fmt.Errorf("%w: %d", ErrInvalidJobId, id))
 	}
-	data := d.getJobData(id)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.initialize()
+	data := d.jobDatas[id]
 	if data == nil || eventJobFrom != data.Job {
 		return newError(fmt.Errorf("%w: %d", ErrJobIdNotRegistered, id))
 	}
-	d.mu.Lock()
-	d.initialize()
-	eventsCh := d.eventsCh
-	d.mu.Unlock()
-	event := Event{
+	select {
+	case d.eventsCh <- Event{
 		JobFrom: eventJobFrom,
 		Name:    eventName,
 		Data:    eventData,
-	}
-	select {
-	case eventsCh <- event:
+	}:
 		return nil
 	default:
 		return newError(ErrEventBufferFull)
