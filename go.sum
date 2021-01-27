@@ -1,0 +1,7 @@
+github.com/goinsane/application v1.0.0 h1:eSq68u95lTeD4lpFyn/VeEyUjxcpC4cJ3rhwcvtEVdE=
+github.com/goinsane/application v1.0.0/go.mod h1:ULqSWs5gN1HKqjS9u9mAmHcrwlzO5XLRKSks+K8UWXs=
+github.com/goinsane/xcontext v1.1.0 h1:+qIFZ5qD0lFvx9LhNlW4CZRXKZ5Z+D639Qp3P7BV3DU=
+github.com/goinsane/xcontext v1.1.0/go.mod h1:y+fK+cXBf9T6MBP7XFXQbYrsyhzlhRVVIIRVTxc6QjY=
+github.com/goinsane/xlog v1.0.0 h1:YO27ov5I3WmD8AyV3EcowNf+ZGqcKex8PUJu2TxdmOI=
+github.com/goinsane/xlog v1.0.0/go.mod h1:LXGz2XS2nzNGvHbFAAPrPDELBXCeQyo2vb60ostxKyU=
+gopkg.in/Graylog2/go-gelf.v2 v2.0.0-20191017102106-1550ee647df0/go.mod h1:CeDeqW4tj9FrgZXF/dQCWZrBdcZWWBenhJtxLH4On2g=
