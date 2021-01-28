@@ -106,11 +106,12 @@ func (d *Daemon) Loop(ctx context.Context) {
 	d.mu.RUnlock()
 	wg.Wait()
 
+	close(eventsCh)
+	eventLoopWg.Wait()
+
 	d.mu.Lock()
 	d.finalize()
 	d.mu.Unlock()
-
-	eventLoopWg.Wait()
 }
 
 func (d *Daemon) initialize() {
@@ -123,7 +124,6 @@ func (d *Daemon) initialize() {
 }
 
 func (d *Daemon) finalize() {
-	close(d.eventsCh)
 	d.eventsCh = nil
 	d.jobDatas = nil
 }
@@ -158,9 +158,9 @@ func (d *Daemon) loop(ctx context.Context, wg *sync.WaitGroup, tm time.Time, dat
 			data.Stopped = true
 			data.Err = e
 		}
-		if ctx.Err() != nil {
+		/*if ctx.Err() != nil {
 			data.flush()
-		}
+		}*/
 	}
 }
 
@@ -260,7 +260,7 @@ func (d *Daemon) NotifyEvent(eventJobFrom Job, eventName string, ch chan<- Event
 	idx := sort.Search(len(eventChs), func(i int) bool {
 		return eventChs[i] == ch
 	})
-	if len(eventChs) > 0 && idx >= 0 {
+	if idx < len(eventChs) {
 		return newError(ErrEventAlreadyRegistered)
 	}
 	if eventChs == nil {
@@ -290,16 +290,14 @@ func (d *Daemon) StopEventNotification(eventJobFrom Job, eventName string, ch ch
 	idx := sort.Search(len(eventChs), func(i int) bool {
 		return eventChs[i] == ch
 	})
-	if len(eventChs) <= 0 || idx < 0 {
+	if idx >= len(eventChs) {
 		return newError(ErrEventNotRegistered)
 	}
 	eventChs[idx] = nil
 	idx = sort.Search(len(eventChs), func(i int) bool {
 		return eventChs[i] == nil
 	})
-	if len(eventChs) > 0 && idx >= 0 {
-		eventChs = eventChs[:idx]
-	}
+	eventChs = eventChs[:idx]
 	if len(eventChs) <= 0 {
 		delete(data.notificationEvents, eventName)
 		return nil
